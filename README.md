@@ -1,15 +1,13 @@
 # Noto Sans ST
 
-Noto Sans ST is a TrueType derivative of the official Noto Sans v2.015 fonts.
-By default, FontTools interpolates the original design at `wdth=85`. The build keeps the
-upstream glyph coverage, including Cyrillic, and identifies the resulting
-width as Normal through `OS/2.usWidthClass=5`. The width axis is fixed in
-both builds.
+These TrueType fonts are built from official Noto Sans v2.015. They retain
+the upstream Unicode coverage, including Cyrillic, and use Normal stretch
+classification in Windows.
 
 ## Build on Windows PowerShell
 
-From the project directory, with Python 3.10 or later and `ttfautohint` on
-PATH. The autohinter version used for this build is 1.8.4.
+Run these commands from the project directory with Python 3.10 or later
+and ttfautohint 1.8.4 on PATH.
 [ttfautohint downloads](https://freetype.org/ttfautohint/)
 
 ```powershell
@@ -19,44 +17,41 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The first build downloads two source fonts from a pinned Google Fonts
-distribution commit. Subsequent builds can run offline using the SHA-256-verified
-cache in `sources/`. FontTools is version-pinned and the build preserves source
-timestamps so repeated builds with the same tool versions use the same font data. The validation command
-checks the default build. [Official distribution commit](https://github.com/google/fonts/commit/2984c575fdce412ee02b2baaba67672b9a9434d8)
+The build downloads the pinned source files on the first run, verifies
+their SHA-256 hashes, and caches them in `sources/`. It writes to
+`dist/release/` by default. Use `--output` to choose another directory.
+[Official distribution commit](https://github.com/google/fonts/commit/2984c575fdce412ee02b2baaba67672b9a9434d8)
 
-## Outputs
+## Font families
 
-| Directory | Contents |
-| --- | --- |
-| `dist/variable/` | `NotoSansST-Variable.ttf` and `NotoSansST-Italic-Variable.ttf`, with upright and italic styles and a continuous weight range of 100–900 |
-| `dist/static/` | 18 faces covering Thin, ExtraLight, Light, Regular, Medium, SemiBold, Bold, ExtraBold, and Black in upright and italic |
+| Family name | Upright upstream width | Italic upstream width |
+| --- | ---: | ---: |
+| Noto Sans ST | 85 | 90 |
+| Noto Sans ST Variable | 80–90, default 85 | 85–95, default 90 |
+| Noto Sans ST Width 800 | 80 | 85 |
+| Noto Sans ST Width 825 | 82.5 | 87.5 |
+| Noto Sans ST Width 850 | 85 | 90 |
+| Noto Sans ST Width 875 | 87.5 | 92.5 |
+| Noto Sans ST Width 900 | 90 | 95 |
 
-Static fonts use `ttfautohint --stem-width-mode=qsn --increase-x-height=0`.
-The autohinting step applies only to static fonts.
+Every family has Regular, Medium, SemiBold, and Bold in upright and italic.
+Each static family has eight TTF files. The variable family has two files
+with four named weights per slope and a continuous weight axis from
+300 to 900, defaulting to Regular (400).
 
-Both formats use the Noto Sans ST typographic family name. The variable fonts’
-full names are **Noto Sans ST Variable** and **Noto Sans ST Italic Variable**.
-For use in an app's font menu, select one format to avoid duplicate style
-entries. The build writes files only.
+Width labels refer to the upright design. Italic uses five additional
+upstream width points in each family. The variable width slider runs from
+approximately 94.12 to 105.88 for both slopes. Its Normal setting of 100
+gives upstream width 85 upright and 90 italic. To convert an upright
+upstream width to a slider value, multiply it by 100 and divide by 85.
+[OpenType Width axis](https://learn.microsoft.com/en-us/typography/opentype/spec/dvaraxistag_wdth)
 
-## Configuration
-
-```powershell
-.\.venv\Scripts\python.exe build.py --family "Noto Sans Studio" --width 90 --output dist\studio
-```
-
-`--width` accepts values from 62.5 to 100. Use distinct family names and output
-directories for builds you plan to keep alongside each other. Family names
-start with an ASCII letter or digit and may also contain spaces, periods,
-hyphens, and underscores. The PostScript prefix uses the letters and digits
-from that name, with a maximum of 38.
-
-`--hinting` selects `qsn` (default), `qsq`, or `qss` for static fonts.
-Use `--hinting none` to build without ttfautohint.
+All families use `ttfautohint --stem-width-mode=qsn --increase-x-height=0`.
+The variable hints are derived from its default outlines. The build checks
+that hinting leaves the glyph geometry and variation tables intact.
 
 ## License
 
-Copyright 2022 The Noto Project Authors. The SIL Open Font License 1.1 is in
-`LICENSE` and is copied to the output directory. Keep it with redistributed
-font files. [Noto Sans upstream release](https://github.com/notofonts/latin-greek-cyrillic/releases/tag/NotoSans-v2.015)
+Copyright 2022 The Noto Project Authors. Each family includes the unchanged
+SIL Open Font License 1.1 from the source distribution.
+[Upstream release](https://github.com/notofonts/latin-greek-cyrillic/releases/tag/NotoSans-v2.015)

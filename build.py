@@ -34,18 +34,20 @@ SOURCES = {
     ),
 }
 WEIGHTS = {
-    100: "Thin",
-    200: "ExtraLight",
-    300: "Light",
     400: "Regular",
     500: "Medium",
     600: "SemiBold",
     700: "Bold",
-    800: "ExtraBold",
-    900: "Black",
 }
 ELIDABLE = 0x0002
-DEFAULT_HINTING = "qsn"
+HINTING_MODE = "qsn"
+BASE_FAMILY = "Noto Sans ST"
+VARIABLE_FAMILY = "Noto Sans ST Variable"
+VARIABLE_WEIGHT_RANGE = (300, 900)
+WIDTHS = (80, 82.5, 85, 87.5, 90)
+NORMAL_WIDTH = 85
+ITALIC_WIDTH_OFFSET = 5
+OUTPUT = ROOT / "dist" / "release"
 
 
 def source_path(italic):
@@ -73,7 +75,7 @@ def postscript_prefix(family):
     prefix = re.sub(r"[^A-Za-z0-9]", "", family)
     if prefix.lower() == "notosans":
         raise ValueError("Use a family name distinct from the upstream Noto Sans.")
-    # Leave room for "VariableItalic-ExtraLight" in a 63-character PS name.
+    # Leave room for the slope and weight in a 63-character PS name.
     if len(prefix) > 38:
         raise ValueError("Family may contain at most 38 letters and digits.")
     return prefix
@@ -96,12 +98,11 @@ def set_metadata(font, family, prefix, width, weight, italic, variable):
         legacy_style = "Italic" if italic else "Regular"
 
     if variable:
-        ps_prefix = f"{prefix}Variable{'Italic' if italic else ''}"
+        ps_prefix = f"{prefix}{'Italic' if italic else ''}"
         ps_name = f"{ps_prefix}-{WEIGHTS[weight]}"
-        full_name = f"{family}{' Italic' if italic else ''} Variable"
     else:
         ps_name = f"{prefix}-{style.replace(' ', '')}"
-        full_name = family if weight == 400 and not italic else f"{family} {style}"
+    full_name = family if weight == 400 and not italic else f"{family} {style}"
 
     names = font["name"]
     for name_id in (1, 2, 3, 4, 6, 16, 17, 18, 20, 21, 22, 25):
@@ -120,8 +121,11 @@ def set_metadata(font, family, prefix, width, weight, italic, variable):
     for name_id, value in ids.items():
         names.setName(value, name_id, 3, 1, 0x409)
 
+    variation_axes = {axis.axisTag: axis for axis in font["fvar"].axes} if variable else {}
+    weights = WEIGHTS if variable else (weight,)
+
     weight_values = []
-    for value in WEIGHTS if variable else (weight,):
+    for value in weights:
         entry = {"name": WEIGHTS[value], "value": value}
         if value == 400:
             entry.update(flags=ELIDABLE, linkedValue=700)
@@ -130,31 +134,43 @@ def set_metadata(font, family, prefix, width, weight, italic, variable):
     italic_value = {"name": "Italic", "value": 1} if italic else {
         "name": "Regular", "value": 0, "flags": ELIDABLE, "linkedValue": 1,
     }
-    buildStatTable(
-        font,
-        [
-            {"tag": "wght", "name": "Weight", "values": weight_values},
-            {"tag": "ital", "name": "Italic", "values": [italic_value]},
-        ],
-        elidedFallbackName="Regular",
-        macNames=False,
-    )
+    stat_axes = [
+        {"tag": "wght", "name": "Weight", "values": weight_values},
+        {"tag": "ital", "name": "Italic", "values": [italic_value]},
+    ]
+    if variable:
+        width_axis = variation_axes["wdth"]
+        stat_axes.append({
+            "tag": "wdth",
+            "name": "Width",
+            "values": [{
+                "name": "Normal",
+                "nominalValue": width_axis.defaultValue,
+                "rangeMinValue": width_axis.minValue,
+                "rangeMaxValue": width_axis.maxValue,
+                "flags": ELIDABLE,
+            }],
+        })
+    buildStatTable(font, stat_axes, elidedFallbackName="Regular", macNames=False)
 
     if variable:
         fvar = font["fvar"]
-        fvar.axes[0].axisNameID = font["STAT"].table.DesignAxisRecord.Axis[0].AxisNameID
-        # Instancing drops upstream named instances outside the pinned width.
+        for axis in font["STAT"].table.DesignAxisRecord.Axis:
+            if axis.AxisTag in variation_axes:
+                variation_axes[axis.AxisTag].axisNameID = axis.AxisNameID
+        defaults = {tag: axis.defaultValue for tag, axis in variation_axes.items()}
+        # Name the four weights at the new Normal width.
         fvar.instances = []
-        for instance_weight, weight_name in WEIGHTS.items():
+        for instance_weight in weights:
             instance = NamedInstance()
-            instance.coordinates = {"wght": instance_weight}
+            instance.coordinates = {**defaults, "wght": instance_weight}
             fvar.instances.append(instance)
             if instance_weight == weight:
                 instance.subfamilyNameID = 17
                 instance.postscriptNameID = 6
                 continue
             instance_style = style_name(instance_weight, italic)
-            instance_ps = f"{ps_prefix}-{weight_name}"
+            instance_ps = f"{ps_prefix}-{WEIGHTS[instance_weight]}"
             instance.subfamilyNameID = names.addName(instance_style, platforms=((3, 1, 0x409),))
             instance.postscriptNameID = names.addName(instance_ps, platforms=((3, 1, 0x409),))
     names.removeUnusedNames(font)
@@ -170,78 +186,118 @@ def set_metadata(font, family, prefix, width, weight, italic, variable):
     font["head"].macStyle = (font["head"].macStyle & ~0x3) | int(bold) | (italic << 1)
 
 
-def save_static(font, destination, stage, hinter, hinting):
-    if hinter is None:
-        font.save(destination)
-        return
+def verify_variable_hinting(original, hinted):
+    for tag in ("fvar", "gvar", "avar", "HVAR", "MVAR", "GDEF", "GPOS", "GSUB", "cmap", "hmtx", "hhea", "OS/2", "STAT"):
+        if tag in original and (tag not in hinted or original.reader[tag] != hinted.reader[tag]):
+            raise ValueError(f"ttfautohint changed the variable font's {tag} table.")
+    if original.getGlyphOrder() != hinted.getGlyphOrder():
+        raise ValueError("ttfautohint changed the variable glyph order.")
 
+    before, after = original["glyf"], hinted["glyf"]
+    for name in original.getGlyphOrder():
+        a, b = before[name], after[name]
+        if a.numberOfContours != b.numberOfContours:
+            raise ValueError(f"ttfautohint changed the number of contours in {name}.")
+        if a.isComposite():
+            matches = [vars(component) for component in a.components] == [
+                vars(component) for component in b.components
+            ]
+        else:
+            matches = a.getCoordinates(before) == b.getCoordinates(after)
+        if not matches:
+            raise ValueError(f"ttfautohint changed the variable glyph geometry in {name}.")
+
+
+def save_hinted(font, destination, stage, hinter):
     unhinted = stage / "unhinted.ttf"
     hinted_file = stage / "hinted.ttf"
     font.save(unhinted)
     subprocess.run(
-        [hinter, "--detailed-info", f"--stem-width-mode={hinting}",
+        [hinter, "--detailed-info", f"--stem-width-mode={HINTING_MODE}",
          "--increase-x-height=0", str(unhinted), str(hinted_file)],
         check=True,
     )
     with TTFont(hinted_file, recalcTimestamp=False) as hinted:
+        if "fvar" in font:
+            with TTFont(unhinted) as original:
+                verify_variable_hinting(original, hinted)
         # ttfautohint sets the modification time to the current time.
         hinted["head"].modified = font["head"].modified
         hinted.save(destination)
 
 
-def build(family, width, output, hinting=DEFAULT_HINTING):
-    prefix = postscript_prefix(family)
-    if not 62.5 <= width <= 100:
-        raise ValueError("Width must be in the upstream wdth range [62.5, 100].")
+def build_variable(source, italic):
+    offset = ITALIC_WIDTH_OFFSET if italic else 0
+    widths = (WIDTHS[0] + offset, NORMAL_WIDTH + offset, WIDTHS[-1] + offset)
+    font = instantiateVariableFont(
+        source, {"wdth": widths, "wght": VARIABLE_WEIGHT_RANGE}
+    )
+    width_axis = next(axis for axis in font["fvar"].axes if axis.axisTag == "wdth")
+    # Both slopes share one slider. Its normalized coordinates map to the
+    # italic design five upstream width points above the upright design.
+    width_axis.minValue = WIDTHS[0] * 100 / NORMAL_WIDTH
+    width_axis.defaultValue = 100
+    width_axis.maxValue = WIDTHS[-1] * 100 / NORMAL_WIDTH
+    set_metadata(
+        font, VARIABLE_FAMILY, postscript_prefix(VARIABLE_FAMILY), widths[1], 400, italic, variable=True
+    )
+    return font
 
-    hinter = None
-    if hinting != "none":
-        hinter = shutil.which("ttfautohint")
-        if hinter is None:
-            raise ValueError("Install ttfautohint and add it to PATH, or build with --hinting none.")
 
+def build(output):
+    hinter = shutil.which("ttfautohint")
+    if hinter is None:
+        raise ValueError("Install ttfautohint and add it to PATH.")
+    static_families = {width: f"{BASE_FAMILY} Width {width * 10:.0f}" for width in WIDTHS}
+    families = (BASE_FAMILY, VARIABLE_FAMILY, *static_families.values())
     inputs = {italic: source_path(italic) for italic in SOURCES}
     output.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=output) as directory:
         stage = Path(directory)
-        (stage / "variable").mkdir()
-        (stage / "static").mkdir()
+        folders = {family: stage / postscript_prefix(family) for family in families}
+        for folder in folders.values():
+            folder.mkdir()
+            shutil.copyfile(ROOT / "LICENSE", folder / "LICENSE")
+
         for italic, path in inputs.items():
             with TTFont(path, recalcTimestamp=False) as source:
-                variable = instantiateVariableFont(source, {"wdth": width})
-                set_metadata(variable, family, prefix, width, 400, italic, variable=True)
-                suffix = "Italic-Variable" if italic else "Variable"
-                variable.save(stage / "variable" / f"{prefix}-{suffix}.ttf")
+                variable = build_variable(source, italic)
+                suffix = "-Italic" if italic else ""
+                variable_path = folders[VARIABLE_FAMILY] / f"NotoSansSTVariable{suffix}.ttf"
+                save_hinted(variable, variable_path, stage, hinter)
 
-                for weight in WEIGHTS:
-                    static = instantiateVariableFont(source, {"wdth": width, "wght": weight})
-                    set_metadata(static, family, prefix, width, weight, italic, variable=False)
-                    destination = stage / "static" / f"{static['name'].getDebugName(6)}.ttf"
-                    save_static(static, destination, stage, hinter, hinting)
+                for width, family in static_families.items():
+                    prefix = postscript_prefix(family)
+                    source_width = width + ITALIC_WIDTH_OFFSET if italic else width
+                    for weight in WEIGHTS:
+                        static = instantiateVariableFont(source, {"wdth": source_width, "wght": weight})
+                        set_metadata(static, family, prefix, source_width, weight, italic, variable=False)
+                        destination = folders[family] / f"{static['name'].getDebugName(6)}.ttf"
+                        save_hinted(static, destination, stage, hinter)
+                        if width == NORMAL_WIDTH:
+                            # The base family and Width 850 share the same hinted design.
+                            with TTFont(destination, recalcTimestamp=False) as base:
+                                set_metadata(base, BASE_FAMILY, postscript_prefix(BASE_FAMILY),
+                                             source_width, weight, italic, variable=False)
+                                base.save(folders[BASE_FAMILY] / f"{base['name'].getDebugName(6)}.ttf")
+                    print(f"Built {family} {'italic' if italic else 'upright'}.", flush=True)
 
-        shutil.copyfile(ROOT / "LICENSE", stage / "LICENSE")
-        for kind in ("variable", "static"):
-            (output / kind).mkdir(exist_ok=True)
-            for file in sorted((stage / kind).iterdir()):
-                file.replace(output / kind / file.name)
-        (stage / "LICENSE").replace(output / "LICENSE")
+        for folder in folders.values():
+            destination = output / folder.name
+            destination.mkdir(exist_ok=True)
+            for file in sorted(folder.iterdir()):
+                file.replace(destination / file.name)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--family", default="Noto Sans ST", help="Font family name (default: %(default)s)")
-    parser.add_argument("--width", type=float, default=85, help="Pinned upstream wdth coordinate (default: %(default)s)")
-    parser.add_argument(
-        "--hinting", choices=("qsn", "qsq", "qss", "none"), default=DEFAULT_HINTING,
-        help="ttfautohint preset for static fonts (default: %(default)s)",
-    )
-    parser.add_argument("--output", type=Path, default=ROOT / "dist", help="Output directory (default: dist)")
+    parser.add_argument("--output", type=Path, default=OUTPUT, help="Output directory (default: dist/release)")
     args = parser.parse_args()
     try:
-        build(args.family.strip(), args.width, args.output, args.hinting)
+        build(args.output)
     except (OSError, URLError, ValueError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"Build failed: {error}\n")
-    print(f"Built 2 variable and 18 static fonts in {args.output.resolve()}")
+    print(f"Built two variable and 48 static fonts in {args.output.resolve()}")
 
 
 if __name__ == "__main__":
